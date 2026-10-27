@@ -183,7 +183,7 @@ http.createServer(async(req,res)=>{
       // YouTube metadata does not reliably identify explicit lyrics or genre.
       // Never label those filters as verified.
       const item={id:randomUUID(),videoId:id,nickname,url:'https://www.youtube.com/watch?v='+id,title:metadata?.snippet?.title||'YouTube video '+id,submittedAt:new Date().toISOString(),status:reasons.length?'flagged':'queued',flagReasons:reasons};
-      if(reasons.length){state.flagged||=[];state.flagged.push(item);}else state.queue.push(item);
+      if(reasons.length){state.flagged||=[];state.flagged.push(item);}else {state.queue.push(item);if(!state.nowPlaying)state.nowPlaying=state.queue.shift();}
       await save();return send(res,201,{item,flagged:!!reasons.length,warning:reasons.length?reasons.join('; '):null});
     }
     if(req.method==='POST'&&path==='/api/messages'){
