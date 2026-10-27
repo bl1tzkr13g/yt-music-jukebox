@@ -205,7 +205,7 @@ http.createServer(async(req,res)=>{
     if(req.method==='GET'&&path==='/api/state'){if(!state.nowPlaying&&state.playlists.some(p=>p.enabled&&p.tracks?.length)){state.nowPlaying=nextSong();await save();}return send(res,200,publicState());}
     if(req.method==='GET'&&path==='/api/alternatives'){
       const id=url.searchParams.get('videoId')||'';
-      if(!/^[\\w-]{11}$/.test(id))return send(res,400,{error:'Invalid video ID'});
+      if(!/^[A-Za-z0-9_-]{11}$/.test(id))return send(res,400,{error:'Invalid video ID'});
       if(!settings.playback?.auto_find_alternative)return send(res,200,{candidates:[],reason:'Automatic fallback disabled'});
       try{return send(res,200,await candidateSearch(id));}
       catch(e){console.error(e);return send(res,503,{error:'Alternative search unavailable'});}
