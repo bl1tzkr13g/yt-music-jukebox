@@ -1,0 +1,13 @@
+{
+  "name": "yt-music-jukebox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node apps/server/index.js",
+    "dev": "node --watch apps/server/index.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

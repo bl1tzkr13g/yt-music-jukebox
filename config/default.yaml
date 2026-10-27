@@ -1,0 +1,28 @@
+server:
+  port: 3000
+  access: lan
+host:
+  max_accounts: 1
+youtube:
+  playlist_sources: [youtube, youtube_music]
+  shuffle: true
+requests:
+  enabled: true
+  approval: automatic
+  max_pending_per_guest: 3
+  duplicate_cooldown_minutes: 60
+  max_video_minutes: 8
+  queue_mode: round_robin
+filters:
+  explicit:
+    enabled: true
+    unknown: reject
+  genres:
+    enabled: false
+    allowed: []
+    blocked: []
+player:
+  mode: video
+  show_queue: true
+  show_qr_code: true
+  show_requester: true
