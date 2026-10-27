@@ -267,7 +267,7 @@ http.createServer(async(req,res)=>{
       if(nonMusicFilter?.enabled){
         const assessment=metadata?nonMusicAssessment(metadata.snippet):{kind:'unknown',reason:'Music content could not be verified'};
         if(assessment.kind!=='music'){
-          if(nonMusicFilter.action==='reject')return send(res,422,{error:assessment.reason+' (non-music filter)'});
+          if(nonMusicFilter.action==='reject'&&assessment.kind==='non_music')return send(res,422,{error:assessment.reason+' (non-music filter)'});
           reasons.push(assessment.reason);
         }
       }
