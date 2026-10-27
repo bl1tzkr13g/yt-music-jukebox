@@ -15,6 +15,13 @@ if(!existsSync(settingsPath)) await writeFile(settingsPath,YAML.stringify(settin
 const wordList=(await readFile(join(root,'config/profanity-words.txt'),'utf8')).split(/\r?\n/).map(x=>x.trim().toLowerCase()).filter(x=>x&&!x.startsWith('#'));
 let state={queue:[],flagged:[],nowPlaying:null,messages:[],session:randomUUID().slice(0,8)};
 if(existsSync(statePath)){try{state={...state,...JSON.parse(await readFile(statePath,'utf8'))};}catch{}}
+state.playlists ||= [];
+state.playlistTurn ||= 0;
+const playlistIdFromUrl=value=>{try{const u=new URL(value);if(!['youtube.com','www.youtube.com','music.youtube.com','m.youtube.com'].includes(u.hostname.toLowerCase()))return null;const id=u.searchParams.get('list');return id&&/^[A-Za-z0-9_-]{10,80}$/.test(id)?id:null;}catch{return null}};
+const youtubeApi=async(path,params)=>{const key=process.env.YOUTUBE_API_KEY;if(!key)throw Error('YOUTUBE_API_KEY is required');const u=new URL('https://www.googleapis.com/youtube/v3/'+path);u.search=new URLSearchParams({...params,key}).toString();const response=await fetch(u,{signal:AbortSignal.timeout(15000)});if(!response.ok)throw Error('YouTube API '+response.status);return response.json()};
+const playlistTracks=async id=>{const tracks=[];let pageToken='';do{const data=await youtubeApi('playlistItems',{part:'snippet,contentDetails',playlistId:id,maxResults:'50',...(pageToken?{pageToken}:{})});for(const item of data.items||[]){const videoId=item.contentDetails?.videoId||item.snippet?.resourceId?.videoId;if(videoId&&/^[\\w-]{11}$/.test(videoId)&&item.snippet?.title!=='Deleted video'&&item.snippet?.title!=='Private video')tracks.push({videoId,title:item.snippet?.title||videoId})}pageToken=data.nextPageToken||'';}while(pageToken&&tracks.length<500);return tracks};
+const nextBackground=()=>{const active=state.playlists.filter(p=>p.enabled&&p.tracks?.length);if(!active.length)return null;const chosen=active[state.playlistTurn%active.length];state.playlistTurn=(state.playlistTurn+1)%active.length;const index=(chosen.position||0)%chosen.tracks.length;const track=chosen.tracks[index];chosen.position=(index+1)%chosen.tracks.length;return {id:randomUUID(),videoId:track.videoId,title:track.title,nickname:'Playlist: '+chosen.name,source:'playlist',playlistId:chosen.id};};
+const nextSong=()=>state.queue.shift()||nextBackground();
 const save=()=>writeFile(statePath,JSON.stringify(state,null,2));
 const send=(res,status,data,type='application/json; charset=utf-8')=>{res.writeHead(status,{'Content-Type':type,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(type.startsWith('application/json')?JSON.stringify(data):data);};
 const body=async req=>{let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>20000)throw Error('Body too large');}return JSON.parse(raw||'{}');};
@@ -116,7 +123,7 @@ const candidateSearch=async (videoId)=>{
   return {original:{title,artist},candidates};
 };
 const publicSettings=()=>({youtube:settings.youtube,requests:settings.requests,chat:{enabled:settings.chat.enabled,mode:settings.chat.mode,max_length:settings.chat.max_length},player:settings.player,playback:settings.playback||{}});
-const publicState=()=>({queue:state.queue,nowPlaying:state.nowPlaying,messages:state.messages,session:state.session,settings:publicSettings()});
+const publicState=()=>({queue:state.queue,nowPlaying:state.nowPlaying,messages:state.messages,session:state.session,playlists:state.playlists.map(({tracks,...p})=>({...p,trackCount:tracks.length})),settings:publicSettings()});
 const lastPost=new Map();
 const mime={'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8'};
 http.createServer(async(req,res)=>{
@@ -135,6 +142,28 @@ http.createServer(async(req,res)=>{
       if(p.length<8||p.length>128)return send(res,400,{error:'Password must be 8–128 characters'});
       await setPassword(p);issueSession(res);return send(res,200,{ok:true});
     }
+    if(req.method==='POST'&&path==='/api/admin/playlists'){
+      if(!authorized(req))return send(res,401,{error:'Sign in first'});
+      const b=await body(req),id=playlistIdFromUrl(String(b.url||''));
+      if(!id)return send(res,400,{error:'Invalid YouTube playlist URL'});
+      if(state.playlists.some(p=>p.id===id))return send(res,409,{error:'Playlist already added'});
+      const info=await youtubeApi('playlists',{part:'snippet',id});
+      const item=info.items?.[0];if(!item)return send(res,404,{error:'Playlist not found or not accessible with API key'});
+      const tracks=await playlistTracks(id);if(!tracks.length)return send(res,422,{error:'Playlist has no accessible tracks'});
+      state.playlists.push({id,name:item.snippet?.title||id,url:'https://www.youtube.com/playlist?list='+id,enabled:true,position:0,tracks});
+      if(!state.nowPlaying)state.nowPlaying=nextSong();
+      await save();return send(res,201,publicState());
+    }
+    if(req.method==='PATCH'&&path==='/api/admin/playlists'){
+      if(!authorized(req))return send(res,401,{error:'Sign in first'});
+      const b=await body(req),p=state.playlists.find(x=>x.id===b.id);if(!p)return send(res,404,{error:'Playlist not found'});
+      if(typeof b.enabled!=='boolean')return send(res,400,{error:'enabled must be boolean'});
+      p.enabled=b.enabled;if(!state.nowPlaying)state.nowPlaying=nextSong();await save();return send(res,200,publicState());
+    }
+    if(req.method==='DELETE'&&path==='/api/admin/playlists'){
+      if(!authorized(req))return send(res,401,{error:'Sign in first'});
+      const b=await body(req);state.playlists=state.playlists.filter(p=>p.id!==b.id);await save();return send(res,200,publicState());
+    }
     if(req.method==='GET'&&path==='/api/admin/flagged'){
       if(!authorized(req))return send(res,401,{error:'Sign in first'});
       return send(res,200,{items:state.flagged||[]});
@@ -144,11 +173,11 @@ http.createServer(async(req,res)=>{
       const b=await body(req),idx=(state.flagged||[]).findIndex(x=>x.id===b.id);
       if(idx<0)return send(res,404,{error:'Flagged request not found'});
       const [item]=state.flagged.splice(idx,1);
-      if(b.action==='approve'){item.status='approved';state.queue.push(item);}
+      if(b.action==='approve'){item.status='approved';state.queue.push(item);if(!state.nowPlaying)state.nowPlaying=nextSong();}
       else if(b.action!=='reject')return send(res,400,{error:'Invalid action'});
       await save();return send(res,200,{ok:true});
     }
-    if(req.method==='GET'&&path==='/api/state')return send(res,200,publicState());
+    if(req.method==='GET'&&path==='/api/state'){if(!state.nowPlaying&&state.playlists.some(p=>p.enabled&&p.tracks?.length)){state.nowPlaying=nextSong();await save();}return send(res,200,publicState());}
     if(req.method==='GET'&&path==='/api/alternatives'){
       const id=url.searchParams.get('videoId')||'';
       if(!/^[\\w-]{11}$/.test(id))return send(res,400,{error:'Invalid video ID'});
@@ -183,7 +212,7 @@ http.createServer(async(req,res)=>{
       // YouTube metadata does not reliably identify explicit lyrics or genre.
       // Never label those filters as verified.
       const item={id:randomUUID(),videoId:id,nickname,url:'https://www.youtube.com/watch?v='+id,title:metadata?.snippet?.title||'YouTube video '+id,submittedAt:new Date().toISOString(),status:reasons.length?'flagged':'queued',flagReasons:reasons};
-      if(reasons.length){state.flagged||=[];state.flagged.push(item);}else {state.queue.push(item);if(!state.nowPlaying)state.nowPlaying=state.queue.shift();}
+      if(reasons.length){state.flagged||=[];state.flagged.push(item);}else {state.queue.push(item);if(!state.nowPlaying)state.nowPlaying=nextSong();}
       await save();return send(res,201,{item,flagged:!!reasons.length,warning:reasons.length?reasons.join('; '):null});
     }
     if(req.method==='POST'&&path==='/api/messages'){
@@ -213,7 +242,7 @@ http.createServer(async(req,res)=>{
     }
     if(path==='/api/admin/advance'&&req.method==='POST'){
       if(!authorized(req))return send(res,401,{error:'Admin token required'});
-      state.nowPlaying=state.queue.shift()||null;await save();return send(res,200,publicState());
+      state.nowPlaying=nextSong();await save();return send(res,200,publicState());
     }
     if(path==='/api/admin/messages'&&req.method==='DELETE'){
       if(!authorized(req))return send(res,401,{error:'Admin token required'});
