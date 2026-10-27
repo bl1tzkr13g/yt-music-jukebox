@@ -72,6 +72,16 @@ function cleanMessage(message){
   if(matched&&filtered===message)return {text:p.replacement||'***',blocked:false};
   return {text:filtered,blocked:false};
 }
+// Conservative metadata screening: hold suspicious requests for human review.
+const adultContentReasons=snippet=>{
+  const title=String(snippet?.title||'');
+  const description=String(snippet?.description||'').slice(0,4000);
+  const text=(title+' '+description).toLowerCase();
+  const reasons=[];
+  if(/\b(?:x[\s-]?rated|xxx|porn(?:ography|ographic)?|adult\s+(?:film|movie|video|entertainment)|sexually\s+explicit|erotic|onlyfans|nsfw)\b/i.test(text))reasons.push('Potential adult-themed content');
+  if(/\b(?:official\s+trailer|movie\s+trailer|documentary\s+trailer|film\s+trailer)\b/i.test(title))reasons.push('Trailer rather than music');
+  return reasons;
+};
 const videoInfo=async id=>{
   const key=process.env.YOUTUBE_API_KEY||'';
   if(!key)return null;
@@ -239,6 +249,8 @@ http.createServer(async(req,res)=>{
       if(metadata&&metadata.status?.privacyStatus!=='public')return send(res,422,{error:'Video is not public'});
       const reasons=[];
       if(!metadata)reasons.push('Metadata could not be verified');
+      if(metadata)reasons.push(...adultContentReasons(metadata.snippet));
+      if(metadata?.contentDetails?.contentRating?.ytRating==='ytAgeRestricted')reasons.push('YouTube age-restricted content');
       if(metadata?.status?.embeddable===false)reasons.push('Embedding restricted');
       const duration=metadata?.contentDetails?.duration||'';
       const match=duration.match(/^PT(?:(\\d+)H)?(?:(\\d+)M)?(?:(\\d+)S)?$/);
