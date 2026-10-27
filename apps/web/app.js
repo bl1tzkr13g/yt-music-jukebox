@@ -1,21 +1,54 @@
-const app=document.querySelector('#app');
-const el=(tag,text)=>{const n=document.createElement(tag);n.textContent=text;return n;};
-const path=location.pathname;
-async function state(){return (await fetch('/api/state',{cache:'no-store'})).json();}
-async function render(){
-  const s=await state();app.replaceChildren();
-  if(path==='/join'){
-    app.append(el('h2','Request a Song'),el('p','Paste a YouTube video link. Submissions are currently stored for testing only; playback and filtering are upcoming.'));
-    const form=document.createElement('form');const name=document.createElement('input');name.placeholder='Nickname';name.maxLength=32;name.required=true;const url=document.createElement('input');url.placeholder='YouTube video URL';url.type='url';url.required=true;const btn=el('button','Submit request');const status=el('p','');form.append(name,url,btn,status);form.addEventListener('submit',async e=>{e.preventDefault();const r=await fetch('/api/requests',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nickname:name.value,url:url.value})});const body=await r.json();status.textContent=r.ok?'Request stored (pending metadata validation)':body.error;if(r.ok)url.value='';await renderQueue();});app.append(form);
-  }else if(path==='/player'){
-    app.append(el('h2','TV Player'),el('p','Player integration is the next milestone. This screen currently shows the saved queue.'));
-    app.append(el('p','Guest requests: '+location.origin+'/join'));
-  }else if(path==='/admin'){
-    app.append(el('h2','Host Dashboard'),el('p','Host authentication and moderation are not implemented yet. This page is currently read-only.'));
-  }else if(path==='/settings'){
-    app.append(el('h2','Configuration'),el('p','Configuration editing, OAuth, filtering, and display preferences are planned.'));
-  }else{app.append(el('h2','Welcome'),el('p','Your self-hosted party jukebox starts here. Open the player or request a song.'));}
-  const section=document.createElement('section');section.id='queue';app.append(section);await renderQueue();
+const app=document.querySelector('#app'),path=location.pathname;
+const node=(tag,text,cls)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e};
+const auth=()=>sessionStorage.getItem('adminToken')||'';
+const api=async(url,opts={})=>{const r=await fetch(url,{...opts,headers:{'Content-Type':'application/json',...(opts.admin?{'Authorization':'Bearer '+auth()}:{})},cache:'no-store'});const data=await r.json();if(!r.ok)throw Error(data.error||'Request failed');return data};
+const add=(parent,...children)=>parent.append(...children);
+const makeButton=(label,handler)=>{const b=node('button',label);b.onclick=handler;return b};
+const status=(parent)=>{const p=node('p','', 'status');parent.append(p);return msg=>p.textContent=msg};
+function requestForm(parent){
+  const form=node('form');const nick=node('input');nick.placeholder='Your nickname';nick.maxLength=32;nick.required=true;nick.value=localStorage.getItem('jukeboxNickname')||'';
+  const link=node('input');link.type='url';link.placeholder='Paste a YouTube video link';link.required=true;
+  const submit=node('button','Add to Queue');submit.type='submit';const say=status(form);add(form,nick,link,submit);
+  form.onsubmit=async e=>{e.preventDefault();localStorage.setItem('jukeboxNickname',nick.value);try{await api('/api/requests',{method:'POST',body:JSON.stringify({nickname:nick.value,url:link.value})});say('Request saved for validation (playback not yet enabled).');link.value='';}catch(err){say(err.message)}};
+  parent.append(form);
 }
-async function renderQueue(){const s=await state();const container=document.querySelector('#queue');if(!container)return;container.replaceChildren(el('h2','Queued Requests ('+s.queue.length+')'));const list=document.createElement('ol');for(const item of s.queue){list.append(el('li',item.videoId+' — requested by '+item.nickname+' ('+item.status+')'));}container.append(list);}
-render();setInterval(renderQueue,3000);
+function chatForm(parent){
+  const form=node('form',undefined,'chat-form');const nick=node('input');nick.placeholder='Nickname';nick.maxLength=32;nick.value=localStorage.getItem('jukeboxNickname')||'';
+  const msg=node('input');msg.placeholder='Your message';msg.maxLength=240;const mode=node('select');
+  for(const [value,label] of [['live','Live Chat'],['song','Current Song']]){const o=node('option',label);o.value=value;mode.append(o)}
+  const submit=node('button','Send');submit.type='submit';const say=status(form);add(form,nick,mode,msg,submit);
+  form.onsubmit=async e=>{e.preventDefault();localStorage.setItem('jukeboxNickname',nick.value);try{await api('/api/messages',{method:'POST',body:JSON.stringify({nickname:nick.value,message:msg.value,mode:mode.value})});msg.value='';say('Message sent');}catch(err){say(err.message)}};
+  parent.append(form);
+}
+function renderQueue(container,s){container.replaceChildren();if(!s.queue.length){container.append(node('p','No guest requests yet.'));return;}for(const item of s.queue){const row=node('div',undefined,'queue-entry');add(row,node('strong',item.title||item.videoId),node('small','Requested by '+item.nickname));container.append(row)}}
+function player(){
+  app.className='player';const layout=node('div',undefined,'layout'),left=node('div',undefined,'left'),right=node('aside',undefined,'sidebar');
+  const video=node('div',undefined,'video'),placeholder=node('div','Waiting for playback…','placeholder');video.append(placeholder);
+  const now=node('div',undefined,'now'),title=node('h2','Now Playing: Waiting for a song'),requester=node('p','Default playlist');add(now,title,requester);
+  const comments=node('section',undefined,'comments'),commentTitle=node('h3','Comments'),messages=node('div');add(comments,commentTitle,messages);
+  const playlist=node('strong','Default Playlist'),upnext=node('div'),queueTitle=node('h3','Queue'),queue=node('div',undefined,'queue'),qr=node('div',undefined,'qr');
+  const qrTitle=node('strong','Scan to request music'),qrImg=node('img'),qrLink=node('small');qrImg.alt='Guest request QR code';add(qr,qrTitle,qrImg,qrLink);
+  add(left,video,now,comments);add(right,playlist,upnext,queueTitle,queue,qr);add(layout,left,right);app.append(layout);
+  let lastVideo=null,lastQR='';
+  async function refresh(){try{
+    const s=await api('/api/state'),p=s.settings.player||{},c=s.settings.chat||{};
+    app.style.setProperty('--bg',p.theme?.background||'#850019');app.style.setProperty('--panel',p.theme?.panel||'#fff');app.style.setProperty('--ink',p.theme?.text||'#151515');app.style.setProperty('--side',(p.sidebar_percent||28)+'%');
+    playlist.textContent='Default Playlist: '+(s.settings.youtube?.default_playlist_name||'Not configured');
+    title.textContent='Now Playing: '+(s.nowPlaying?.title||'Waiting for a song');
+    requester.textContent='Requested by: '+(s.nowPlaying?.nickname||'Default playlist');
+    if(s.nowPlaying?.videoId!==lastVideo){lastVideo=s.nowPlaying?.videoId||null;video.replaceChildren();if(lastVideo){const iframe=node('iframe');iframe.src='https://www.youtube.com/embed/'+encodeURIComponent(lastVideo)+'?autoplay=1&enablejsapi=1';iframe.allow='autoplay; encrypted-media; picture-in-picture';iframe.title='YouTube music player';video.append(iframe)}else video.append(node('div','Waiting for playback…','placeholder'))}
+    upnext.replaceChildren(node('h2','Up Next'),node('strong',s.queue[0]?.title||'Default playlist'),node('p','Requested by: '+(s.queue[0]?.nickname||'Host')));
+    queueTitle.style.display=p.show_queue===false?'none':'';queue.style.display=p.show_queue===false?'none':'';
+    if(p.show_queue!==false)renderQueue(queue,{queue:s.queue.slice(1)});
+    comments.style.display=p.show_comments===false||!c.enabled?'none':'';
+    messages.replaceChildren();for(const m of s.messages.filter(x=>c.mode==='both'||x.mode===c.mode).filter(x=>x.mode==='live'||x.videoId===s.nowPlaying?.videoId).slice(-20)){messages.append(node('div',m.nickname+': '+m.message,'message'))}
+    qr.style.display=p.show_qr_code===false?'none':'';
+    const join=location.origin+'/join';if(lastQR!==join){lastQR=join;qrImg.src='/api/qr?base='+encodeURIComponent(join);qrLink.textContent=join}
+  }catch(e){console.error(e)}}
+  refresh();setInterval(refresh,3000);
+}
+function guest(){app.className='';const p=node('div',undefined,'panel');add(p,node('h1','Request Music'),node('p','Join the queue by pasting a YouTube video link.'));requestForm(p);add(p,node('h2','Chat and Song Comments'));chatForm(p);const queue=node('div');p.append(queue);app.append(p);const refresh=async()=>{try{const s=await api('/api/state');queue.replaceChildren(node('h2','Upcoming Requests'));renderQueue(queue,s)}catch{}};refresh();setInterval(refresh,3000)}
+function admin(){app.className='';const p=node('div',undefined,'panel');add(p,node('h1','Host Dashboard'),node('p','Admin actions require an ADMIN_TOKEN set in Docker.'));const token=node('input');token.type='password';token.placeholder='Admin token';token.value=auth();token.onchange=()=>sessionStorage.setItem('adminToken',token.value);p.append(token);const say=status(p);add(p,makeButton('Play next queued request',async()=>{try{await api('/api/admin/advance',{method:'POST',admin:true});say('Queue advanced')}catch(e){say(e.message)}}),makeButton('Clear chat',async()=>{try{await api('/api/admin/messages',{method:'DELETE',admin:true});say('Chat cleared')}catch(e){say(e.message)}}));app.append(p)}
+function settings(){app.className='';const p=node('div',undefined,'panel');add(p,node('h1','Configuration'),node('p','Edit YAML settings. Changes save to /data/config.yaml and apply immediately. Keep a backup before editing.'));const token=node('input');token.type='password';token.placeholder='Admin token';token.value=auth();token.onchange=()=>sessionStorage.setItem('adminToken',token.value);const editor=node('textarea');editor.spellcheck=false;const say=status(p);
+  add(p,token,makeButton('Load configuration',async()=>{try{editor.value=(await api('/api/admin/config',{admin:true})).yaml;say('Loaded')}catch(e){say(e.message)}}),editor,makeButton('Save configuration',async()=>{try{await api('/api/admin/config',{method:'PUT',admin:true,body:JSON.stringify({yaml:editor.value})});say('Saved')}catch(e){say(e.message)}}));app.append(p)}
+if(path==='/player')player();else if(path==='/join')guest();else if(path==='/admin')admin();else if(path==='/settings')settings();else{app.className='';const p=node('div',undefined,'panel');add(p,node('h1','YT Music Jukebox'),node('p','Open the TV player, submit a song request, or configure the host.'));app.append(p)}

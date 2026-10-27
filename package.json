@@ -1,11 +1,15 @@
 {
   "name": "yt-music-jukebox",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "node apps/server/index.js",
     "dev": "node --watch apps/server/index.js"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1",
+    "qrcode": "^1.5.4"
   },
   "engines": {
     "node": ">=22"

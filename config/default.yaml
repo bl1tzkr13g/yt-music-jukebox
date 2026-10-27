@@ -1,14 +1,12 @@
 server:
   port: 3000
   access: lan
-host:
-  max_accounts: 1
 youtube:
-  playlist_sources: [youtube, youtube_music]
+  default_playlist_name: My Country Music Mix
+  default_playlist_url: ""
   shuffle: true
 requests:
   enabled: true
-  approval: automatic
   max_pending_per_guest: 3
   duplicate_cooldown_minutes: 60
   max_video_minutes: 8
@@ -21,8 +19,28 @@ filters:
     enabled: false
     allowed: []
     blocked: []
+    unknown: reject
+chat:
+  enabled: true
+  mode: both
+  max_length: 240
+  cooldown_seconds: 5
+  max_messages: 100
+  profanity:
+    enabled: true
+    action: mask
+    replacement: "***"
+    extra_words: []
+    allow_words: []
 player:
-  mode: video
+  theme:
+    background: "#850019"
+    panel: "#ffffff"
+    text: "#151515"
+  sidebar_percent: 28
   show_queue: true
   show_qr_code: true
+  show_comments: true
   show_requester: true
+  compact_queue: false
+  video_mode: video

@@ -10,4 +10,5 @@ services:
     environment:
       PORT: "3000"
       DATA_DIR: /data
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Set ADMIN_TOKEN to a random secret of at least 16 characters}
     restart: unless-stopped
