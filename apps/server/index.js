@@ -19,7 +19,7 @@ state.playlists ||= [];
 state.playlistTurn ||= 0;
 const playlistIdFromUrl=value=>{try{const u=new URL(value);if(!['youtube.com','www.youtube.com','music.youtube.com','m.youtube.com'].includes(u.hostname.toLowerCase()))return null;const id=u.searchParams.get('list');return id&&/^[A-Za-z0-9_-]{10,80}$/.test(id)?id:null;}catch{return null}};
 const youtubeApi=async(path,params)=>{const key=process.env.YOUTUBE_API_KEY;if(!key)throw Error('YOUTUBE_API_KEY is required');const u=new URL('https://www.googleapis.com/youtube/v3/'+path);u.search=new URLSearchParams({...params,key}).toString();const response=await fetch(u,{signal:AbortSignal.timeout(15000)});if(!response.ok)throw Error('YouTube API '+response.status);return response.json()};
-const playlistTracks=async id=>{const tracks=[];let pageToken='';do{const data=await youtubeApi('playlistItems',{part:'snippet,contentDetails',playlistId:id,maxResults:'50',...(pageToken?{pageToken}:{})});for(const item of data.items||[]){const videoId=item.contentDetails?.videoId||item.snippet?.resourceId?.videoId;if(videoId&&/^[\\w-]{11}$/.test(videoId)&&item.snippet?.title!=='Deleted video'&&item.snippet?.title!=='Private video')tracks.push({videoId,title:item.snippet?.title||videoId})}pageToken=data.nextPageToken||'';}while(pageToken&&tracks.length<500);return tracks};
+const playlistTracks=async id=>{const tracks=[];let pageToken='';do{const data=await youtubeApi('playlistItems',{part:'snippet,contentDetails',playlistId:id,maxResults:'50',...(pageToken?{pageToken}:{})});for(const item of data.items||[]){const videoId=item.contentDetails?.videoId||item.snippet?.resourceId?.videoId;if(videoId&&/^[A-Za-z0-9_-]{11}$/.test(videoId)&&item.snippet?.title!=='Deleted video'&&item.snippet?.title!=='Private video')tracks.push({videoId,title:item.snippet?.title||videoId})}pageToken=data.nextPageToken||'';}while(pageToken&&tracks.length<500);return tracks};
 const nextBackground=()=>{const active=state.playlists.filter(p=>p.enabled&&p.tracks?.length);if(!active.length)return null;const chosen=active[state.playlistTurn%active.length];state.playlistTurn=(state.playlistTurn+1)%active.length;const index=(chosen.position||0)%chosen.tracks.length;const track=chosen.tracks[index];chosen.position=(index+1)%chosen.tracks.length;return {id:randomUUID(),videoId:track.videoId,title:track.title,nickname:'Playlist: '+chosen.name,source:'playlist',playlistId:chosen.id};};
 const nextSong=()=>state.queue.shift()||nextBackground();
 const save=()=>writeFile(statePath,JSON.stringify(state,null,2));
@@ -149,7 +149,7 @@ http.createServer(async(req,res)=>{
       if(state.playlists.some(p=>p.id===id))return send(res,409,{error:'Playlist already added'});
       const info=await youtubeApi('playlists',{part:'snippet',id});
       const item=info.items?.[0];if(!item)return send(res,404,{error:'Playlist not found or not accessible with API key'});
-      const tracks=await playlistTracks(id);if(!tracks.length)return send(res,422,{error:'Playlist has no accessible tracks'});
+      const tracks=await playlistTracks(id);if(!tracks.length)return send(res,422,{error:'Playlist returned no valid playable video IDs; check playlist visibility and YouTube API access'});
       state.playlists.push({id,name:item.snippet?.title||id,url:'https://www.youtube.com/playlist?list='+id,enabled:true,position:0,tracks});
       if(!state.nowPlaying)state.nowPlaying=nextSong();
       await save();return send(res,201,publicState());
