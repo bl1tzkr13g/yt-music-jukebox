@@ -44,3 +44,11 @@ player:
   show_requester: true
   compact_queue: false
   video_mode: video
+
+playback:
+  prefer_music_video: true
+  allow_lyric_video: true
+  allow_audio_only: true
+  auto_find_alternative: true
+  skip_unplayable: true
+  max_alternative_attempts: 6
