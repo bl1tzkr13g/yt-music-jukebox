@@ -39,7 +39,60 @@ function cleanMessage(message){
   if(matched&&filtered===message)return {text:p.replacement||'***',blocked:false};
   return {text:filtered,blocked:false};
 }
-const publicSettings=()=>({youtube:settings.youtube,requests:settings.requests,chat:{enabled:settings.chat.enabled,mode:settings.chat.mode,max_length:settings.chat.max_length},player:settings.player});
+const videoInfo=async id=>{
+  const key=process.env.YOUTUBE_API_KEY||'';
+  if(!key)return null;
+  const u=new URL('https://www.googleapis.com/youtube/v3/videos');
+  u.search=new URLSearchParams({part:'snippet,contentDetails,status',id,key}).toString();
+  const r=await fetch(u,{signal:AbortSignal.timeout(9000)});
+  if(!r.ok)throw Error('YouTube metadata lookup failed: '+r.status);
+  return (await r.json()).items?.[0]||null;
+};
+const candidateSearch=async (videoId)=>{
+  const key=process.env.YOUTUBE_API_KEY||'';
+  if(!key)return {candidates:[],reason:'Set YOUTUBE_API_KEY to enable alternative searches'};
+  const original=await videoInfo(videoId);
+  if(!original)return {candidates:[],reason:'Original video metadata unavailable'};
+  const title=original.snippet?.title||'';
+  const artist=original.snippet?.channelTitle||'';
+  const base=title.replace(/\\([^)]*(official|video|lyrics?|audio|hd|4k)[^)]*\\)/gi,'').replace(/\\[[^\\]]*(official|video|lyrics?|audio)[^\\]]*\\]/gi,'').trim();
+  const searches=[
+    {type:'music_video',query:base+' official music video'},
+    {type:'lyric_video',query:base+' official lyric video'},
+    {type:'audio',query:base+' official audio'}
+  ];
+  const seen=new Set([videoId]),candidates=[];
+  const limit=Math.max(1,Math.min(12,Number(settings.playback?.max_alternative_attempts||6)));
+  for(const group of searches){
+    const u=new URL('https://www.googleapis.com/youtube/v3/search');
+    u.search=new URLSearchParams({part:'snippet',type:'video',videoEmbeddable:'true',maxResults:'8',q:group.query,key}).toString();
+    const r=await fetch(u,{signal:AbortSignal.timeout(9000)});
+    if(!r.ok)continue;
+    const results=(await r.json()).items||[];
+    const ids=results.map(x=>x.id?.videoId).filter(Boolean);
+    if(!ids.length)continue;
+    const v=new URL('https://www.googleapis.com/youtube/v3/videos');
+    v.search=new URLSearchParams({part:'status,snippet',id:ids.join(','),key}).toString();
+    const vr=await fetch(v,{signal:AbortSignal.timeout(9000)});
+    if(!vr.ok)continue;
+    const details=(await vr.json()).items||[];
+    for(const item of details){
+      if(seen.has(item.id)||item.status?.embeddable!==true||item.status?.privacyStatus!=='public')continue;
+      const t=(item.snippet?.title||'').toLowerCase();
+      const words=base.toLowerCase().replace(/[^a-z0-9 ]/g,' ').split(/\\s+/).filter(w=>w.length>2);
+      if(words.length&&words.filter(w=>t.includes(w)).length<Math.max(1,Math.ceil(words.length*.65)))continue;
+      if(group.type==='music_video'&&/\\b(cover|reaction|karaoke|live|remix|lyrics?|audio only)\\b/i.test(t))continue;
+      if(group.type==='lyric_video'&&!/lyric/i.test(t))continue;
+      if(group.type==='audio'&&!/audio|topic|provided to youtube/i.test(t+' '+(item.snippet?.channelTitle||'')))continue;
+      seen.add(item.id);
+      candidates.push({videoId:item.id,title:item.snippet.title,channel:item.snippet.channelTitle,type:group.type});
+      if(candidates.length>=limit)break;
+    }
+    if(candidates.length>=limit)break;
+  }
+  return {original:{title,artist},candidates};
+};
+const publicSettings=()=>({youtube:settings.youtube,requests:settings.requests,chat:{enabled:settings.chat.enabled,mode:settings.chat.mode,max_length:settings.chat.max_length},player:settings.player,playback:settings.playback||{}});
 const publicState=()=>({...state,settings:publicSettings()});
 const lastPost=new Map();
 const mime={'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8'};
@@ -47,6 +100,13 @@ http.createServer(async(req,res)=>{
   try{
     const url=new URL(req.url,'http://localhost'),path=url.pathname;
     if(req.method==='GET'&&path==='/api/state')return send(res,200,publicState());
+    if(req.method==='GET'&&path==='/api/alternatives'){
+      const id=url.searchParams.get('videoId')||'';
+      if(!/^[\\w-]{11}$/.test(id))return send(res,400,{error:'Invalid video ID'});
+      if(!settings.playback?.auto_find_alternative)return send(res,200,{candidates:[],reason:'Automatic fallback disabled'});
+      try{return send(res,200,await candidateSearch(id));}
+      catch(e){console.error(e);return send(res,503,{error:'Alternative search unavailable'});}
+    }
     if(req.method==='GET'&&path==='/api/qr'){
       const base=String(url.searchParams.get('base')||'');
       const u=new URL(base);
@@ -61,8 +121,11 @@ http.createServer(async(req,res)=>{
       if(!nickname)return send(res,400,{error:'Nickname required'});
       if(state.queue.some(x=>x.videoId===id)||state.nowPlaying?.videoId===id)return send(res,409,{error:'Already queued or playing'});
       if(state.queue.filter(x=>x.nickname.toLowerCase()===nickname.toLowerCase()).length>=settings.requests.max_pending_per_guest)return send(res,429,{error:'Request limit reached'});
-      const item={id:randomUUID(),videoId:id,nickname,url:'https://www.youtube.com/watch?v='+id,title:'YouTube video '+id,submittedAt:new Date().toISOString(),status:'unverified'};
-      state.queue.push(item);await save();return send(res,201,{item,warning:'Metadata verification is not yet available'});
+      let metadata=null;
+      try{metadata=await videoInfo(id);}catch(e){console.warn('Metadata unavailable:',e.message);}
+      if(metadata&&metadata.status?.privacyStatus!=='public')return send(res,422,{error:'Video is not public'});
+      const item={id:randomUUID(),videoId:id,nickname,url:'https://www.youtube.com/watch?v='+id,title:metadata?.snippet?.title||'YouTube video '+id,submittedAt:new Date().toISOString(),status:metadata?'metadata_checked':'unverified'};
+      state.queue.push(item);await save();return send(res,201,{item,warning:metadata?null:'Metadata verification unavailable; set YOUTUBE_API_KEY'});
     }
     if(req.method==='POST'&&path==='/api/messages'){
       if(!settings.chat.enabled)return send(res,403,{error:'Chat disabled'});
