@@ -9,7 +9,7 @@ function requestForm(parent){
   const form=node('form');const nick=node('input');nick.placeholder='Your nickname';nick.maxLength=32;nick.required=true;nick.value=localStorage.getItem('jukeboxNickname')||'';
   const link=node('input');link.type='url';link.placeholder='Paste a YouTube video link';link.required=true;
   const submit=node('button','Add to Queue');submit.type='submit';const say=status(form);add(form,nick,link,submit);
-  form.onsubmit=async e=>{e.preventDefault();localStorage.setItem('jukeboxNickname',nick.value);try{await api('/api/requests',{method:'POST',body:JSON.stringify({nickname:nick.value,url:link.value})});say('Request saved for validation (playback not yet enabled).');link.value='';}catch(err){say(err.message)}};
+  form.onsubmit=async e=>{e.preventDefault();localStorage.setItem('jukeboxNickname',nick.value);try{await api('/api/requests',{method:'POST',body:JSON.stringify({nickname:nick.value,url:link.value})});say('Request submitted. Songs needing review are held for the host.');link.value='';}catch(err){say(err.message)}};
   parent.append(form);
 }
 function chatForm(parent){
@@ -29,7 +29,7 @@ function player(){
   const playlist=node('strong','Default Playlist'),upnext=node('div'),queueTitle=node('h3','Queue'),queue=node('div',undefined,'queue'),qr=node('div',undefined,'qr');
   const qrTitle=node('strong','Scan to request music'),qrImg=node('img'),qrLink=node('small');qrImg.alt='Guest request QR code';add(qr,qrTitle,qrImg,qrLink);
   add(left,video,now,comments);add(right,playlist,upnext,queueTitle,queue,qr);add(layout,left,right);app.append(layout);
-  let lastVideo=null,lastQR='',playerInstance=null,attempted=new Set(),fallbacks=[],fallbackIndex=0,activeId=null,loadingFallback=false;
+  let currentItemId=null,lastVideo=null,lastQR='',playerInstance=null,attempted=new Set(),fallbacks=[],fallbackIndex=0,activeId=null,loadingFallback=false;
   function showVideo(id){
     activeId=id;
     video.replaceChildren();
@@ -40,6 +40,10 @@ function player(){
       onError:()=>tryFallback(),
       onStateChange:e=>{if(e.data===YT.PlayerState.ENDED)tryFallback(true)}
     }});
+  }
+  async function advanceAutomatically(){
+    if(!currentItemId)return;
+    try{await api('/api/player/advance',{method:'POST',body:JSON.stringify({currentId:currentItemId})});}catch(e){console.warn(e)}
   }
   async function tryFallback(ended=false){
     if(loadingFallback)return;
@@ -54,9 +58,9 @@ function player(){
         while(fallbackIndex<fallbacks.length&&attempted.has(fallbacks[fallbackIndex].videoId))fallbackIndex++;
         const next=fallbacks[fallbackIndex++];
         if(next){attempted.add(next.videoId);title.textContent='Fallback: '+next.title;showVideo(next.videoId);return;}
-        video.replaceChildren(node('div','This video cannot be embedded; no playable alternative found. Ask the host to advance the queue.','placeholder'));
+        video.replaceChildren(node('div','This video cannot be embedded; no playable alternative found. Skipping request…','placeholder');if(currentItemId)await advanceAutomatically();return;
       }else{
-        video.replaceChildren(node('div','Song finished. Waiting for the host to advance the queue.','placeholder'));
+        video.replaceChildren(node('div','Song finished. Loading next request…','placeholder'));await advanceAutomatically();
       }
     }catch(e){video.replaceChildren(node('div','Playback failed: '+e.message,'placeholder'))}
     finally{loadingFallback=false}
@@ -70,7 +74,7 @@ function player(){
     playlist.textContent='Default Playlist: '+(s.settings.youtube?.default_playlist_name||'Not configured');
     title.textContent='Now Playing: '+(s.nowPlaying?.title||'Waiting for a song');
     requester.textContent='Requested by: '+(s.nowPlaying?.nickname||'Default playlist');
-    if(s.nowPlaying?.videoId!==lastVideo){lastVideo=s.nowPlaying?.videoId||null;attempted=new Set();fallbacks=[];fallbackIndex=0;if(lastVideo){attempted.add(lastVideo);showVideo(lastVideo)}else video.replaceChildren(node('div','Waiting for playback…','placeholder'))}
+    if(s.nowPlaying?.videoId!==lastVideo){currentItemId=s.nowPlaying?.id||null;lastVideo=s.nowPlaying?.videoId||null;attempted=new Set();fallbacks=[];fallbackIndex=0;if(lastVideo){attempted.add(lastVideo);showVideo(lastVideo)}else video.replaceChildren(node('div','Waiting for playback…','placeholder'))}
     upnext.replaceChildren(node('h2','Up Next'),node('strong',s.queue[0]?.title||'Default playlist'),node('p','Requested by: '+(s.queue[0]?.nickname||'Host')));
     queueTitle.style.display=p.show_queue===false?'none':'';queue.style.display=p.show_queue===false?'none':'';
     if(p.show_queue!==false)renderQueue(queue,{queue:s.queue.slice(1)});
@@ -82,7 +86,23 @@ function player(){
   refresh();setInterval(refresh,3000);
 }
 function guest(){app.className='';const p=node('div',undefined,'panel');add(p,node('h1','Request Music'),node('p','Join the queue by pasting a YouTube video link.'));requestForm(p);add(p,node('h2','Chat and Song Comments'));chatForm(p);const queue=node('div');p.append(queue);app.append(p);const refresh=async()=>{try{const s=await api('/api/state');queue.replaceChildren(node('h2','Upcoming Requests'));renderQueue(queue,s)}catch{}};refresh();setInterval(refresh,3000)}
-function admin(){app.className='';const p=node('div',undefined,'panel');add(p,node('h1','Host Dashboard'),node('p','Admin actions require an ADMIN_TOKEN set in Docker.'));const token=node('input');token.type='password';token.placeholder='Admin token';token.value=auth();token.onchange=()=>sessionStorage.setItem('adminToken',token.value);p.append(token);const say=status(p);add(p,makeButton('Play next queued request',async()=>{try{await api('/api/admin/advance',{method:'POST',admin:true});say('Queue advanced')}catch(e){say(e.message)}}),makeButton('Clear chat',async()=>{try{await api('/api/admin/messages',{method:'DELETE',admin:true});say('Chat cleared')}catch(e){say(e.message)}}));app.append(p)}
-function settings(){app.className='';const p=node('div',undefined,'panel');add(p,node('h1','Configuration'),node('p','Edit YAML settings. Changes save to /data/config.yaml and apply immediately. Keep a backup before editing.'));const token=node('input');token.type='password';token.placeholder='Admin token';token.value=auth();token.onchange=()=>sessionStorage.setItem('adminToken',token.value);const editor=node('textarea');editor.spellcheck=false;const say=status(p);
-  add(p,token,makeButton('Load configuration',async()=>{try{editor.value=(await api('/api/admin/config',{admin:true})).yaml;say('Loaded')}catch(e){say(e.message)}}),editor,makeButton('Save configuration',async()=>{try{await api('/api/admin/config',{method:'PUT',admin:true,body:JSON.stringify({yaml:editor.value})});say('Saved')}catch(e){say(e.message)}}));app.append(p)}
+function loginPanel(p){
+ const pw=node('input');pw.type='password';pw.placeholder='Admin password (or original token for first login)';
+ const say=status(p);
+ add(p,node('h2','Host sign in'),pw,makeButton('Sign in',async()=>{try{await api('/api/admin/login',{method:'POST',body:JSON.stringify({password:pw.value})});pw.value='';say('Signed in. You can now manage the jukebox.');}catch(e){say(e.message)}}));
+ const newPw=node('input');newPw.type='password';newPw.placeholder='Set or change password (8+ characters)';
+ add(p,newPw,makeButton('Save new password',async()=>{try{await api('/api/admin/password',{method:'POST',body:JSON.stringify({password:newPw.value})});newPw.value='';say('Password saved. You remain signed in.')}catch(e){say(e.message)}}));
+}
+function admin(){
+ app.className='';const p=node('div',undefined,'panel');add(p,node('h1','Host Dashboard'),node('p','Sign in once; your browser remembers the session for seven days.'));loginPanel(p);
+ const say=status(p),flagged=node('div');add(p,makeButton('Play next queued request',async()=>{try{await api('/api/admin/advance',{method:'POST',admin:true});say('Queue advanced')}catch(e){say(e.message)}}),makeButton('Clear chat',async()=>{try{await api('/api/admin/messages',{method:'DELETE',admin:true});say('Chat cleared')}catch(e){say(e.message)}}),node('h2','Flagged requests'),makeButton('Refresh flagged requests',loadFlagged),flagged);
+ async function loadFlagged(){try{const d=await api('/api/admin/flagged',{admin:true});flagged.replaceChildren();if(!d.items.length)flagged.append(node('p','No requests awaiting review'));for(const item of d.items){const row=node('div',undefined,'queue-entry');add(row,node('strong',item.title),node('p',item.flagReasons.join('; ')),makeButton('Approve',()=>moderate(item.id,'approve')),makeButton('Reject',()=>moderate(item.id,'reject')));flagged.append(row)}}catch(e){say(e.message)}}
+ async function moderate(id,action){try{await api('/api/admin/moderate',{method:'POST',admin:true,body:JSON.stringify({id,action})});await loadFlagged()}catch(e){say(e.message)}}
+ app.append(p);
+}
+function settings(){
+ app.className='';const p=node('div',undefined,'panel');add(p,node('h1','Configuration'),node('p','Edit YAML settings. Changes save to /data/config.yaml.'));loginPanel(p);
+ const editor=node('textarea');editor.spellcheck=false;const say=status(p);
+ add(p,makeButton('Load configuration',async()=>{try{editor.value=(await api('/api/admin/config',{admin:true})).yaml;say('Loaded')}catch(e){say(e.message)}}),editor,makeButton('Save configuration',async()=>{try{await api('/api/admin/config',{method:'PUT',admin:true,body:JSON.stringify({yaml:editor.value})});say('Saved')}catch(e){say(e.message)}}));app.append(p);
+}
 if(path==='/player')player();else if(path==='/join')guest();else if(path==='/admin')admin();else if(path==='/settings')settings();else{app.className='';const p=node('div',undefined,'panel');add(p,node('h1','YT Music Jukebox'),node('p','Open the TV player, submit a song request, or configure the host.'));app.append(p)}
