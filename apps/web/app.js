@@ -102,6 +102,8 @@ function admin(){
  async function loadFlagged(){try{const d=await api('/api/admin/flagged',{admin:true});flagged.replaceChildren();if(!d.items.length)flagged.append(node('p','No requests awaiting review'));for(const item of d.items){const row=node('div',undefined,'queue-entry');add(row,node('strong',item.title),node('p',item.flagReasons.join('; ')),makeButton('Approve',()=>moderate(item.id,'approve')),makeButton('Reject',()=>moderate(item.id,'reject')));flagged.append(row)}}catch(e){say(e.message)}}
  async function moderate(id,action){try{await api('/api/admin/moderate',{method:'POST',admin:true,body:JSON.stringify({id,action})});await loadFlagged()}catch(e){say(e.message)}}
  app.append(p);
+ loadPlaylists();
+ loadFlagged();
 }
 function settings(){
  app.className='';const p=node('div',undefined,'panel');add(p,node('h1','Configuration'),node('p','Edit YAML settings. Changes save to /data/config.yaml.'));loginPanel(p);
