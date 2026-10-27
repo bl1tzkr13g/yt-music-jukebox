@@ -17,12 +17,13 @@ let state={queue:[],flagged:[],nowPlaying:null,messages:[],session:randomUUID().
 if(existsSync(statePath)){try{state={...state,...JSON.parse(await readFile(statePath,'utf8'))};}catch{}}
 state.playlists ||= [];
 state.playlistTurn ||= 0;
+state.selectedPlaylistId ||= null;
 const playlistIdFromUrl=value=>{try{const u=new URL(value);if(!['youtube.com','www.youtube.com','music.youtube.com','m.youtube.com'].includes(u.hostname.toLowerCase()))return null;const id=u.searchParams.get('list');return id&&/^[A-Za-z0-9_-]{10,80}$/.test(id)?id:null;}catch{return null}};
 const youtubeApi=async(path,params)=>{const key=process.env.YOUTUBE_API_KEY;if(!key)throw Error('YOUTUBE_API_KEY is required');const u=new URL('https://www.googleapis.com/youtube/v3/'+path);u.search=new URLSearchParams({...params,key}).toString();const response=await fetch(u,{signal:AbortSignal.timeout(15000)});if(!response.ok)throw Error('YouTube API '+response.status);return response.json()};
 const playlistTracks=async id=>{const tracks=[];let pageToken='';do{const data=await youtubeApi('playlistItems',{part:'snippet,contentDetails',playlistId:id,maxResults:'50',...(pageToken?{pageToken}:{})});for(const item of data.items||[]){const videoId=item.contentDetails?.videoId||item.snippet?.resourceId?.videoId;if(videoId&&/^[A-Za-z0-9_-]{11}$/.test(videoId)&&item.snippet?.title!=='Deleted video'&&item.snippet?.title!=='Private video')tracks.push({videoId,title:item.snippet?.title||videoId})}pageToken=data.nextPageToken||'';}while(pageToken&&tracks.length<500);return tracks};
 const channelHandleFromUrl=value=>{try{const u=new URL(value);if(!['youtube.com','www.youtube.com','m.youtube.com'].includes(u.hostname.toLowerCase()))return null;const m=u.pathname.match(/^\/@([A-Za-z0-9._-]+)(?:\/videos)?\/?$/);return m?m[1]:null;}catch{return null}};
 const channelSource=async handle=>{const info=await youtubeApi('channels',{part:'snippet,contentDetails',forHandle:'@'+handle});const item=info.items?.[0];if(!item)throw Error('Channel not found or not publicly accessible');const uploads=item.contentDetails?.relatedPlaylists?.uploads;if(!uploads)throw Error('Channel uploads playlist unavailable');return {id:'channel:'+item.id,name:item.snippet?.title||handle,uploads,handle}};
-const nextBackground=()=>{const active=state.playlists.filter(p=>p.enabled&&p.tracks?.length);if(!active.length)return null;const chosen=active[state.playlistTurn%active.length];state.playlistTurn=(state.playlistTurn+1)%active.length;const index=(chosen.position||0)%chosen.tracks.length;const track=chosen.tracks[index];chosen.position=(index+1)%chosen.tracks.length;return {id:randomUUID(),videoId:track.videoId,title:track.title,nickname:'Playlist: '+chosen.name,source:'playlist',playlistId:chosen.id};};
+const nextBackground=()=>{const active=state.playlists.filter(p=>p.enabled&&p.tracks?.length);if(!active.length)return null;const chosen=active.find(p=>p.id===state.selectedPlaylistId)||active[state.playlistTurn%active.length];if(!state.selectedPlaylistId)state.playlistTurn=(state.playlistTurn+1)%active.length;const index=(chosen.position||0)%chosen.tracks.length;const track=chosen.tracks[index];chosen.position=(index+1)%chosen.tracks.length;return {id:randomUUID(),videoId:track.videoId,title:track.title,nickname:'Playlist: '+chosen.name,source:'playlist',playlistId:chosen.id};};
 const nextSong=()=>state.queue.shift()||nextBackground();
 const save=()=>writeFile(statePath,JSON.stringify(state,null,2));
 const send=(res,status,data,type='application/json; charset=utf-8')=>{res.writeHead(status,{'Content-Type':type,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(type.startsWith('application/json')?JSON.stringify(data):data);};
@@ -125,7 +126,7 @@ const candidateSearch=async (videoId)=>{
   return {original:{title,artist},candidates};
 };
 const publicSettings=()=>({youtube:settings.youtube,requests:settings.requests,chat:{enabled:settings.chat.enabled,mode:settings.chat.mode,max_length:settings.chat.max_length},player:settings.player,playback:settings.playback||{}});
-const publicState=()=>({queue:state.queue,nowPlaying:state.nowPlaying,messages:state.messages,session:state.session,playlists:state.playlists.map(({tracks,...p})=>({...p,trackCount:tracks.length})),settings:publicSettings()});
+const publicState=()=>({queue:state.queue,nowPlaying:state.nowPlaying,messages:state.messages,session:state.session,playlists:state.playlists.map(({tracks,...p})=>({...p,trackCount:tracks.length})),selectedPlaylistId:state.selectedPlaylistId,settings:publicSettings()});
 const lastPost=new Map();
 const mime={'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8'};
 http.createServer(async(req,res)=>{
@@ -163,6 +164,7 @@ http.createServer(async(req,res)=>{
         entry={id,name:item.snippet?.title||id,url:'https://www.youtube.com/playlist?list='+id,sourceType:'playlist',enabled:true,position:0,tracks,lastRefreshed:new Date().toISOString()};
       }
       state.playlists.push(entry);
+      if(!state.selectedPlaylistId)state.selectedPlaylistId=entry.id;
       if(!state.nowPlaying)state.nowPlaying=nextSong();
       await save();return send(res,201,publicState());
     }
@@ -179,15 +181,23 @@ http.createServer(async(req,res)=>{
       p.lastRefreshed=new Date().toISOString();
       await save();return send(res,200,publicState());
     }
+    if(req.method==='POST'&&path==='/api/admin/playlists/select'){
+      if(!authorized(req))return send(res,401,{error:'Sign in first'});
+      const b=await body(req),p=state.playlists.find(x=>x.id===b.id);
+      if(!p)return send(res,404,{error:'Playlist not found'});
+      p.enabled=true;
+      state.selectedPlaylistId=p.id;
+      await save();return send(res,200,publicState());
+    }
     if(req.method==='PATCH'&&path==='/api/admin/playlists'){
       if(!authorized(req))return send(res,401,{error:'Sign in first'});
       const b=await body(req),p=state.playlists.find(x=>x.id===b.id);if(!p)return send(res,404,{error:'Playlist not found'});
       if(typeof b.enabled!=='boolean')return send(res,400,{error:'enabled must be boolean'});
-      p.enabled=b.enabled;if(!state.nowPlaying)state.nowPlaying=nextSong();await save();return send(res,200,publicState());
+      p.enabled=b.enabled;if(!p.enabled&&state.selectedPlaylistId===p.id)state.selectedPlaylistId=null;if(!state.nowPlaying)state.nowPlaying=nextSong();await save();return send(res,200,publicState());
     }
     if(req.method==='DELETE'&&path==='/api/admin/playlists'){
       if(!authorized(req))return send(res,401,{error:'Sign in first'});
-      const b=await body(req);state.playlists=state.playlists.filter(p=>p.id!==b.id);await save();return send(res,200,publicState());
+      const b=await body(req);state.playlists=state.playlists.filter(p=>p.id!==b.id);if(state.selectedPlaylistId===b.id)state.selectedPlaylistId=null;await save();return send(res,200,publicState());
     }
     if(req.method==='GET'&&path==='/api/admin/flagged'){
       if(!authorized(req))return send(res,401,{error:'Sign in first'});
