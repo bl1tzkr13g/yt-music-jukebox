@@ -2,7 +2,7 @@ import http from 'node:http';
 import {readFile,writeFile,mkdir} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {join,resolve,extname} from 'node:path';
-import {randomUUID,timingSafeEqual} from 'node:crypto';
+import {randomUUID,timingSafeEqual,randomBytes,scryptSync,createHash} from 'node:crypto';
 import YAML from 'yaml';
 import QRCode from 'qrcode';
 
@@ -13,13 +13,36 @@ const defaultConfig=YAML.parse(await readFile(join(root,'config/default.yaml'),'
 let settings=existsSync(settingsPath)?YAML.parse(await readFile(settingsPath,'utf8')):defaultConfig;
 if(!existsSync(settingsPath)) await writeFile(settingsPath,YAML.stringify(settings));
 const wordList=(await readFile(join(root,'config/profanity-words.txt'),'utf8')).split(/\r?\n/).map(x=>x.trim().toLowerCase()).filter(x=>x&&!x.startsWith('#'));
-let state={queue:[],nowPlaying:null,messages:[],session:randomUUID().slice(0,8)};
+let state={queue:[],flagged:[],nowPlaying:null,messages:[],session:randomUUID().slice(0,8)};
 if(existsSync(statePath)){try{state={...state,...JSON.parse(await readFile(statePath,'utf8'))};}catch{}}
 const save=()=>writeFile(statePath,JSON.stringify(state,null,2));
 const send=(res,status,data,type='application/json; charset=utf-8')=>{res.writeHead(status,{'Content-Type':type,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(type.startsWith('application/json')?JSON.stringify(data):data);};
 const body=async req=>{let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>20000)throw Error('Body too large');}return JSON.parse(raw||'{}');};
 const token=process.env.ADMIN_TOKEN||'';
-const authorized=req=>{const supplied=String(req.headers.authorization||'').replace(/^Bearer /,'');return token.length>=16&&supplied.length===token.length&&timingSafeEqual(Buffer.from(supplied),Buffer.from(token));};
+const authPath=join(dataDir,'admin-auth.json');
+let credential=existsSync(authPath)?JSON.parse(await readFile(authPath,'utf8')):null;
+const sessions=new Map();
+const secureEq=(a,b)=>{const x=createHash('sha256').update(String(a)).digest(),z=createHash('sha256').update(String(b)).digest();return timingSafeEqual(x,z)};
+const checkPassword=p=>credential?secureEq(scryptSync(String(p),Buffer.from(credential.salt,'hex'),64).toString('hex'),credential.hash):secureEq(p,process.env.ADMIN_PASSWORD||token);
+const authorized=req=>{
+ const sid=String(req.headers.cookie||'').split(';').map(x=>x.trim()).find(x=>x.startsWith('jukebox_session='))?.slice(16);
+ if(sid&&sessions.get(sid)>Date.now())return true;
+ const supplied=String(req.headers.authorization||'').replace(/^Bearer /,'');
+ return !credential&&!!token&&secureEq(supplied,token);
+};
+const setPassword=async p=>{
+ const salt=randomBytes(16).toString('hex');
+ credential={salt,hash:scryptSync(p,Buffer.from(salt,'hex'),64).toString('hex')};
+ await writeFile(authPath,JSON.stringify(credential),{mode:0o600});
+ sessions.clear();
+};
+const loginAttempts=new Map();
+const issueSession=res=>{
+ const sid=randomBytes(32).toString('hex');
+ sessions.set(sid,Date.now()+7*86400000);
+ res.setHeader('Set-Cookie','jukebox_session='+sid+'; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800');
+};
+
 const idFromUrl=value=>{try{const u=new URL(value),h=u.hostname.toLowerCase();if(h==='youtu.be')return u.pathname.split('/')[1];if(['youtube.com','www.youtube.com','m.youtube.com','music.youtube.com'].includes(h))return u.pathname.startsWith('/shorts/')?u.pathname.split('/')[2]:u.searchParams.get('v');}catch{}return null;};
 const normalize=s=>s.toLowerCase().replace(/[@]/g,'a').replace(/[0]/g,'o').replace(/[1!]/g,'i').replace(/[3]/g,'e').replace(/[4]/g,'a').replace(/[5$]/g,'s').replace(/[7]/g,'t');
 const escape=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
@@ -93,12 +116,38 @@ const candidateSearch=async (videoId)=>{
   return {original:{title,artist},candidates};
 };
 const publicSettings=()=>({youtube:settings.youtube,requests:settings.requests,chat:{enabled:settings.chat.enabled,mode:settings.chat.mode,max_length:settings.chat.max_length},player:settings.player,playback:settings.playback||{}});
-const publicState=()=>({...state,settings:publicSettings()});
+const publicState=()=>({queue:state.queue,nowPlaying:state.nowPlaying,messages:state.messages,session:state.session,settings:publicSettings()});
 const lastPost=new Map();
 const mime={'.html':'text/html; charset=utf-8','.js':'application/javascript; charset=utf-8','.css':'text/css; charset=utf-8'};
 http.createServer(async(req,res)=>{
   try{
     const url=new URL(req.url,'http://localhost'),path=url.pathname;
+    if(req.method==='POST'&&path==='/api/admin/login'){
+      const ip=req.socket.remoteAddress||'unknown',entry=loginAttempts.get(ip)||{count:0,until:0};
+      if(entry.until>Date.now())return send(res,429,{error:'Too many attempts; retry later'});
+      const b=await body(req);
+      if(!checkPassword(String(b.password||''))){entry.count++;if(entry.count>=5){entry.until=Date.now()+300000;entry.count=0;}loginAttempts.set(ip,entry);return send(res,401,{error:'Incorrect password'});}
+      loginAttempts.delete(ip);issueSession(res);return send(res,200,{ok:true,needsPasswordSetup:!credential});
+    }
+    if(req.method==='POST'&&path==='/api/admin/password'){
+      if(!authorized(req))return send(res,401,{error:'Sign in first'});
+      const b=await body(req),p=String(b.password||'');
+      if(p.length<8||p.length>128)return send(res,400,{error:'Password must be 8–128 characters'});
+      await setPassword(p);issueSession(res);return send(res,200,{ok:true});
+    }
+    if(req.method==='GET'&&path==='/api/admin/flagged'){
+      if(!authorized(req))return send(res,401,{error:'Sign in first'});
+      return send(res,200,{items:state.flagged||[]});
+    }
+    if(req.method==='POST'&&path==='/api/admin/moderate'){
+      if(!authorized(req))return send(res,401,{error:'Sign in first'});
+      const b=await body(req),idx=(state.flagged||[]).findIndex(x=>x.id===b.id);
+      if(idx<0)return send(res,404,{error:'Flagged request not found'});
+      const [item]=state.flagged.splice(idx,1);
+      if(b.action==='approve'){item.status='approved';state.queue.push(item);}
+      else if(b.action!=='reject')return send(res,400,{error:'Invalid action'});
+      await save();return send(res,200,{ok:true});
+    }
     if(req.method==='GET'&&path==='/api/state')return send(res,200,publicState());
     if(req.method==='GET'&&path==='/api/alternatives'){
       const id=url.searchParams.get('videoId')||'';
@@ -119,13 +168,23 @@ http.createServer(async(req,res)=>{
       if(!id||!/^[\w-]{11}$/.test(id))return send(res,400,{error:'Invalid YouTube URL'});
       const nickname=String(b.nickname||'').trim().slice(0,32);
       if(!nickname)return send(res,400,{error:'Nickname required'});
-      if(state.queue.some(x=>x.videoId===id)||state.nowPlaying?.videoId===id)return send(res,409,{error:'Already queued or playing'});
+      if([...state.queue,...(state.flagged||[])].some(x=>x.videoId===id)||state.nowPlaying?.videoId===id)return send(res,409,{error:'Already queued or playing'});
       if(state.queue.filter(x=>x.nickname.toLowerCase()===nickname.toLowerCase()).length>=settings.requests.max_pending_per_guest)return send(res,429,{error:'Request limit reached'});
       let metadata=null;
       try{metadata=await videoInfo(id);}catch(e){console.warn('Metadata unavailable:',e.message);}
       if(metadata&&metadata.status?.privacyStatus!=='public')return send(res,422,{error:'Video is not public'});
-      const item={id:randomUUID(),videoId:id,nickname,url:'https://www.youtube.com/watch?v='+id,title:metadata?.snippet?.title||'YouTube video '+id,submittedAt:new Date().toISOString(),status:metadata?'metadata_checked':'unverified'};
-      state.queue.push(item);await save();return send(res,201,{item,warning:metadata?null:'Metadata verification unavailable; set YOUTUBE_API_KEY'});
+      const reasons=[];
+      if(!metadata)reasons.push('Metadata could not be verified');
+      if(metadata?.status?.embeddable===false)reasons.push('Embedding restricted');
+      const duration=metadata?.contentDetails?.duration||'';
+      const match=duration.match(/^PT(?:(\\d+)H)?(?:(\\d+)M)?(?:(\\d+)S)?$/);
+      const seconds=match?Number(match[1]||0)*3600+Number(match[2]||0)*60+Number(match[3]||0):0;
+      if(seconds&&seconds>Number(settings.requests.max_video_minutes||8)*60)reasons.push('Video exceeds duration limit');
+      // YouTube metadata does not reliably identify explicit lyrics or genre.
+      // Never label those filters as verified.
+      const item={id:randomUUID(),videoId:id,nickname,url:'https://www.youtube.com/watch?v='+id,title:metadata?.snippet?.title||'YouTube video '+id,submittedAt:new Date().toISOString(),status:reasons.length?'flagged':'queued',flagReasons:reasons};
+      if(reasons.length){state.flagged||=[];state.flagged.push(item);}else state.queue.push(item);
+      await save();return send(res,201,{item,flagged:!!reasons.length,warning:reasons.length?reasons.join('; '):null});
     }
     if(req.method==='POST'&&path==='/api/messages'){
       if(!settings.chat.enabled)return send(res,403,{error:'Chat disabled'});
@@ -159,6 +218,11 @@ http.createServer(async(req,res)=>{
     if(path==='/api/admin/messages'&&req.method==='DELETE'){
       if(!authorized(req))return send(res,401,{error:'Admin token required'});
       state.messages=[];await save();return send(res,200,{ok:true});
+    }
+    if(req.method==='POST'&&path==='/api/player/advance'){
+      const b=await body(req);
+      if(!state.nowPlaying||state.nowPlaying.id!==b.currentId)return send(res,409,{error:'Playback changed'});
+      state.nowPlaying=state.queue.shift()||null;await save();return send(res,200,publicState());
     }
     if(req.method!=='GET')return send(res,405,{error:'Method not allowed'});
     const file=path==='/app.js'?join(webDir,'app.js'):path==='/style.css'?join(webDir,'style.css'):join(webDir,'index.html');
