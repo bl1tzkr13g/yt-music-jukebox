@@ -12,6 +12,9 @@ requests:
   max_video_minutes: 8
   queue_mode: round_robin
 filters:
+  non_music:
+    enabled: true
+    action: flag
   explicit:
     enabled: true
     unknown: reject
