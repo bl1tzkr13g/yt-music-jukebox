@@ -4,7 +4,7 @@ services:
     image: yt-music-jukebox:dev
     container_name: yt-music-jukebox
     ports:
-      - "3000:3000"
+      - "3035:3000"
     volumes:
       - /mnt/user/appdata/yt-music-jukebox:/data
     environment:
