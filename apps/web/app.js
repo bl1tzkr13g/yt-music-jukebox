@@ -29,14 +29,48 @@ function player(){
   const playlist=node('strong','Default Playlist'),upnext=node('div'),queueTitle=node('h3','Queue'),queue=node('div',undefined,'queue'),qr=node('div',undefined,'qr');
   const qrTitle=node('strong','Scan to request music'),qrImg=node('img'),qrLink=node('small');qrImg.alt='Guest request QR code';add(qr,qrTitle,qrImg,qrLink);
   add(left,video,now,comments);add(right,playlist,upnext,queueTitle,queue,qr);add(layout,left,right);app.append(layout);
-  let lastVideo=null,lastQR='';
+  let lastVideo=null,lastQR='',playerInstance=null,attempted=new Set(),fallbacks=[],fallbackIndex=0,activeId=null,loadingFallback=false;
+  function showVideo(id){
+    activeId=id;
+    video.replaceChildren();
+    const holder=node('div');holder.id='yt-jukebox-player';holder.style.width='100%';holder.style.height='100%';video.append(holder);
+    if(!window.YT?.Player){video.append(node('p','Loading YouTube player…'));return;}
+    playerInstance=new YT.Player(holder,{width:'100%',height:'100%',videoId:id,playerVars:{autoplay:1,playsinline:1,origin:location.origin},events:{
+      onReady:e=>{try{e.target.playVideo()}catch{}},
+      onError:()=>tryFallback(),
+      onStateChange:e=>{if(e.data===YT.PlayerState.ENDED)tryFallback(true)}
+    }});
+  }
+  async function tryFallback(ended=false){
+    if(loadingFallback)return;
+    loadingFallback=true;
+    try{
+      if(!fallbacks.length&&!ended){
+        const data=await api('/api/alternatives?videoId='+encodeURIComponent(lastVideo));
+        fallbacks=data.candidates||[];
+        fallbackIndex=0;
+      }
+      if(!ended){
+        while(fallbackIndex<fallbacks.length&&attempted.has(fallbacks[fallbackIndex].videoId))fallbackIndex++;
+        const next=fallbacks[fallbackIndex++];
+        if(next){attempted.add(next.videoId);title.textContent='Fallback: '+next.title;showVideo(next.videoId);return;}
+        video.replaceChildren(node('div','This video cannot be embedded; no playable alternative found. Ask the host to advance the queue.','placeholder'));
+      }else{
+        video.replaceChildren(node('div','Song finished. Waiting for the host to advance the queue.','placeholder'));
+      }
+    }catch(e){video.replaceChildren(node('div','Playback failed: '+e.message,'placeholder'))}
+    finally{loadingFallback=false}
+  }
+  const ytScript=node('script');ytScript.src='https://www.youtube.com/iframe_api';document.head.append(ytScript);
+  const previousReady=window.onYouTubeIframeAPIReady;
+  window.onYouTubeIframeAPIReady=()=>{previousReady?.();if(lastVideo)showVideo(lastVideo)};
   async function refresh(){try{
     const s=await api('/api/state'),p=s.settings.player||{},c=s.settings.chat||{};
     app.style.setProperty('--bg',p.theme?.background||'#850019');app.style.setProperty('--panel',p.theme?.panel||'#fff');app.style.setProperty('--ink',p.theme?.text||'#151515');app.style.setProperty('--side',(p.sidebar_percent||28)+'%');
     playlist.textContent='Default Playlist: '+(s.settings.youtube?.default_playlist_name||'Not configured');
     title.textContent='Now Playing: '+(s.nowPlaying?.title||'Waiting for a song');
     requester.textContent='Requested by: '+(s.nowPlaying?.nickname||'Default playlist');
-    if(s.nowPlaying?.videoId!==lastVideo){lastVideo=s.nowPlaying?.videoId||null;video.replaceChildren();if(lastVideo){const iframe=node('iframe');iframe.src='https://www.youtube.com/embed/'+encodeURIComponent(lastVideo)+'?autoplay=1&enablejsapi=1';iframe.allow='autoplay; encrypted-media; picture-in-picture';iframe.title='YouTube music player';video.append(iframe)}else video.append(node('div','Waiting for playback…','placeholder'))}
+    if(s.nowPlaying?.videoId!==lastVideo){lastVideo=s.nowPlaying?.videoId||null;attempted=new Set();fallbacks=[];fallbackIndex=0;if(lastVideo){attempted.add(lastVideo);showVideo(lastVideo)}else video.replaceChildren(node('div','Waiting for playback…','placeholder'))}
     upnext.replaceChildren(node('h2','Up Next'),node('strong',s.queue[0]?.title||'Default playlist'),node('p','Requested by: '+(s.queue[0]?.nickname||'Host')));
     queueTitle.style.display=p.show_queue===false?'none':'';queue.style.display=p.show_queue===false?'none':'';
     if(p.show_queue!==false)renderQueue(queue,{queue:s.queue.slice(1)});
