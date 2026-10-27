@@ -20,6 +20,8 @@ state.playlistTurn ||= 0;
 const playlistIdFromUrl=value=>{try{const u=new URL(value);if(!['youtube.com','www.youtube.com','music.youtube.com','m.youtube.com'].includes(u.hostname.toLowerCase()))return null;const id=u.searchParams.get('list');return id&&/^[A-Za-z0-9_-]{10,80}$/.test(id)?id:null;}catch{return null}};
 const youtubeApi=async(path,params)=>{const key=process.env.YOUTUBE_API_KEY;if(!key)throw Error('YOUTUBE_API_KEY is required');const u=new URL('https://www.googleapis.com/youtube/v3/'+path);u.search=new URLSearchParams({...params,key}).toString();const response=await fetch(u,{signal:AbortSignal.timeout(15000)});if(!response.ok)throw Error('YouTube API '+response.status);return response.json()};
 const playlistTracks=async id=>{const tracks=[];let pageToken='';do{const data=await youtubeApi('playlistItems',{part:'snippet,contentDetails',playlistId:id,maxResults:'50',...(pageToken?{pageToken}:{})});for(const item of data.items||[]){const videoId=item.contentDetails?.videoId||item.snippet?.resourceId?.videoId;if(videoId&&/^[A-Za-z0-9_-]{11}$/.test(videoId)&&item.snippet?.title!=='Deleted video'&&item.snippet?.title!=='Private video')tracks.push({videoId,title:item.snippet?.title||videoId})}pageToken=data.nextPageToken||'';}while(pageToken&&tracks.length<500);return tracks};
+const channelHandleFromUrl=value=>{try{const u=new URL(value);if(!['youtube.com','www.youtube.com','m.youtube.com'].includes(u.hostname.toLowerCase()))return null;const m=u.pathname.match(/^\/@([A-Za-z0-9._-]+)(?:\/videos)?\/?$/);return m?m[1]:null;}catch{return null}};
+const channelSource=async handle=>{const info=await youtubeApi('channels',{part:'snippet,contentDetails',forHandle:'@'+handle});const item=info.items?.[0];if(!item)throw Error('Channel not found or not publicly accessible');const uploads=item.contentDetails?.relatedPlaylists?.uploads;if(!uploads)throw Error('Channel uploads playlist unavailable');return {id:'channel:'+item.id,name:item.snippet?.title||handle,uploads,handle}};
 const nextBackground=()=>{const active=state.playlists.filter(p=>p.enabled&&p.tracks?.length);if(!active.length)return null;const chosen=active[state.playlistTurn%active.length];state.playlistTurn=(state.playlistTurn+1)%active.length;const index=(chosen.position||0)%chosen.tracks.length;const track=chosen.tracks[index];chosen.position=(index+1)%chosen.tracks.length;return {id:randomUUID(),videoId:track.videoId,title:track.title,nickname:'Playlist: '+chosen.name,source:'playlist',playlistId:chosen.id};};
 const nextSong=()=>state.queue.shift()||nextBackground();
 const save=()=>writeFile(statePath,JSON.stringify(state,null,2));
@@ -144,15 +146,38 @@ http.createServer(async(req,res)=>{
     }
     if(req.method==='POST'&&path==='/api/admin/playlists'){
       if(!authorized(req))return send(res,401,{error:'Sign in first'});
-      const b=await body(req),id=playlistIdFromUrl(String(b.url||''));
-      if(!id)return send(res,400,{error:'Invalid YouTube playlist URL'});
-      if(state.playlists.some(p=>p.id===id))return send(res,409,{error:'Playlist already added'});
-      const info=await youtubeApi('playlists',{part:'snippet',id});
-      const item=info.items?.[0];if(!item)return send(res,404,{error:'Playlist not found or not accessible with API key'});
-      const tracks=await playlistTracks(id);if(!tracks.length)return send(res,422,{error:'Playlist returned no valid playable video IDs; check playlist visibility and YouTube API access'});
-      state.playlists.push({id,name:item.snippet?.title||id,url:'https://www.youtube.com/playlist?list='+id,enabled:true,position:0,tracks});
+      const b=await body(req),urlValue=String(b.url||''),id=playlistIdFromUrl(urlValue),handle=channelHandleFromUrl(urlValue);
+      if(!id&&!handle)return send(res,400,{error:'Enter a YouTube playlist URL or a channel @handle/videos URL'});
+      let entry;
+      if(handle){
+        const channel=await channelSource(handle);
+        if(state.playlists.some(p=>p.id===channel.id))return send(res,409,{error:'Channel already added'});
+        const tracks=await playlistTracks(channel.uploads);
+        if(!tracks.length)return send(res,422,{error:'Channel has no accessible public uploads'});
+        entry={id:channel.id,name:channel.name,url:'https://www.youtube.com/@'+channel.handle+'/videos',sourceType:'channel',uploadsId:channel.uploads,enabled:true,position:0,tracks,lastRefreshed:new Date().toISOString()};
+      }else{
+        if(state.playlists.some(p=>p.id===id))return send(res,409,{error:'Playlist already added'});
+        const info=await youtubeApi('playlists',{part:'snippet',id});
+        const item=info.items?.[0];if(!item)return send(res,404,{error:'Playlist not found or not accessible with API key'});
+        const tracks=await playlistTracks(id);if(!tracks.length)return send(res,422,{error:'Playlist has no accessible tracks'});
+        entry={id,name:item.snippet?.title||id,url:'https://www.youtube.com/playlist?list='+id,sourceType:'playlist',enabled:true,position:0,tracks,lastRefreshed:new Date().toISOString()};
+      }
+      state.playlists.push(entry);
       if(!state.nowPlaying)state.nowPlaying=nextSong();
       await save();return send(res,201,publicState());
+    }
+    if(req.method==='POST'&&path==='/api/admin/playlists/refresh'){
+      if(!authorized(req))return send(res,401,{error:'Sign in first'});
+      const b=await body(req),p=state.playlists.find(x=>x.id===b.id);
+      if(!p)return send(res,404,{error:'Source not found'});
+      const tracks=await playlistTracks(p.uploadsId||p.id);
+      if(!tracks.length)return send(res,422,{error:'No accessible videos returned; existing catalog preserved'});
+      const nextId=p.tracks?.[p.position%p.tracks.length]?.videoId;
+      p.tracks=tracks;
+      const index=tracks.findIndex(t=>t.videoId===nextId);
+      p.position=index>=0?index:Math.min(p.position||0,tracks.length-1);
+      p.lastRefreshed=new Date().toISOString();
+      await save();return send(res,200,publicState());
     }
     if(req.method==='PATCH'&&path==='/api/admin/playlists'){
       if(!authorized(req))return send(res,401,{error:'Sign in first'});
