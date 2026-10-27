@@ -82,6 +82,19 @@ const adultContentReasons=snippet=>{
   if(/\b(?:official\s+trailer|movie\s+trailer|documentary\s+trailer|film\s+trailer)\b/i.test(title))reasons.push('Trailer rather than music');
   return reasons;
 };
+// YouTube does not provide a reliable music/non-music classification.
+// These rules identify clear non-music signals; ambiguous videos are held for review.
+const nonMusicAssessment=snippet=>{
+  const title=String(snippet?.title||'');
+  const description=String(snippet?.description||'').slice(0,2500);
+  const category=String(snippet?.categoryId||'');
+  const channel=String(snippet?.channelTitle||'');
+  const combined=title+' '+description;
+  if(/\b(?:official\s+(?:music\s+)?video|lyrics?\s+video|official\s+audio|visualizer|music\s+video|song\s+cover|full\s+album)\b/i.test(title)||category==='10')return {kind:'music'};
+  if(/\b(?:movie\s+trailer|film\s+trailer|official\s+trailer|documentary|movie\s+review|gameplay|walkthrough|podcast|interview|news\s+report|tutorial|how\s+to|reaction\s+video|unboxing|stand[ -]?up\s+comedy)\b/i.test(title))return {kind:'non_music',reason:'Likely non-music video'};
+  if(/\b(?:music|song|singer|band|artist|album|records|vevo|topic)\b/i.test(title+' '+channel))return {kind:'music'};
+  return {kind:'unknown',reason:'Music content could not be verified'};
+};
 const videoInfo=async id=>{
   const key=process.env.YOUTUBE_API_KEY||'';
   if(!key)return null;
@@ -250,6 +263,14 @@ http.createServer(async(req,res)=>{
       const reasons=[];
       if(!metadata)reasons.push('Metadata could not be verified');
       if(metadata)reasons.push(...adultContentReasons(metadata.snippet));
+      const nonMusicFilter=settings.filters?.non_music;
+      if(nonMusicFilter?.enabled){
+        const assessment=metadata?nonMusicAssessment(metadata.snippet):{kind:'unknown',reason:'Music content could not be verified'};
+        if(assessment.kind!=='music'){
+          if(nonMusicFilter.action==='reject')return send(res,422,{error:assessment.reason+' (non-music filter)'});
+          reasons.push(assessment.reason);
+        }
+      }
       if(metadata?.contentDetails?.contentRating?.ytRating==='ytAgeRestricted')reasons.push('YouTube age-restricted content');
       if(metadata?.status?.embeddable===false)reasons.push('Embedding restricted');
       const duration=metadata?.contentDetails?.duration||'';
