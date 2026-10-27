@@ -58,7 +58,7 @@ function player(){
         while(fallbackIndex<fallbacks.length&&attempted.has(fallbacks[fallbackIndex].videoId))fallbackIndex++;
         const next=fallbacks[fallbackIndex++];
         if(next){attempted.add(next.videoId);title.textContent='Fallback: '+next.title;showVideo(next.videoId);return;}
-        video.replaceChildren(node('div','This video cannot be embedded; no playable alternative found. Skipping request…','placeholder');if(currentItemId)await advanceAutomatically();return;
+        video.replaceChildren(node('div','This video cannot be embedded; no playable alternative found. Skipping request…','placeholder'));if(currentItemId)await advanceAutomatically();return;
       }else{
         video.replaceChildren(node('div','Song finished. Loading next request…','placeholder'));await advanceAutomatically();
       }
