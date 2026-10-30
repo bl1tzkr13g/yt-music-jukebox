@@ -10,7 +10,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -32,3 +32,13 @@ jobs:
         with:
           name: YT-Music-Jukebox-FireTV-APK
           path: fire-tv-player/app/build/outputs/apk/debug/app-debug.apk
+      - name: Publish direct-download APK release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp fire-tv-player/app/build/outputs/apk/debug/app-debug.apk YT-Music-Jukebox-FireTV.apk
+          if gh release view fire-tv-latest >/dev/null 2>&1; then
+            gh release upload fire-tv-latest YT-Music-Jukebox-FireTV.apk --clobber
+          else
+            gh release create fire-tv-latest YT-Music-Jukebox-FireTV.apk --title "Fire TV Player (latest)" --notes "Direct-install APK for Fire TV Downloader. Built from the main branch." --latest=false
+          fi
