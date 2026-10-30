@@ -16,3 +16,8 @@ html.tv-display,html.tv-display body{height:100%;overflow:hidden}
 .tv-display .qr img{width:auto;height:min(15vh,125px);max-width:90%;object-fit:contain}
 .tv-display .qr small{font-size:11px}
 @media(max-width:720px){.tv-display .layout{grid-template-columns:minmax(0,1fr) minmax(190px,28%)}.tv-display .sidebar{min-height:0}}
+
+/* Player pages are dedicated displays, not navigation screens. */
+body:has(main.player) header{display:none}
+body:has(main.player) main.player{min-height:100vh}
+body:has(main.player) .layout{min-height:calc(100vh - 24px)}
