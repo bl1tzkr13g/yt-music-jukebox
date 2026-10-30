@@ -64,6 +64,8 @@ public class MainActivity extends Activity {
         webView.getSettings().setDomStorageEnabled(true);
         webView.getSettings().setMediaPlaybackRequiresUserGesture(false);
         webView.getSettings().setAllowFileAccess(false);
+        webView.getSettings().setMediaPlaybackRequiresUserGesture(false);
+        android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true);
         webView.setWebChromeClient(new WebChromeClient());
         webView.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -90,6 +92,10 @@ public class MainActivity extends Activity {
     }
     @Override public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_MENU) { askServer(); return true; }
+        if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
+            if (webView != null) webView.evaluateJavascript("window.fireTvStartPlayback && window.fireTvStartPlayback()", null);
+            return true;
+        }
         if (keyCode == KeyEvent.KEYCODE_BACK) { return true; }
         return super.onKeyDown(keyCode, event);
     }
