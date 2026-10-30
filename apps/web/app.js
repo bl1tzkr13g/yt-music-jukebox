@@ -29,22 +29,22 @@ function player(){
   const playlist=node('strong','Default Playlist'),upnext=node('div'),queueTitle=node('h3','Queue'),queue=node('div',undefined,'queue'),qr=node('div',undefined,'qr');
   const qrTitle=node('strong','Scan to request music'),qrImg=node('img'),qrLink=node('small');qrImg.alt='Guest request QR code';add(qr,qrTitle,qrImg,qrLink);
   add(left,video,now,comments);add(right,playlist,upnext,queueTitle,queue,qr);add(layout,left,right);app.append(layout);
-  let currentItemId=null,lastVideo=null,lastQR='',playerInstance=null,attempted=new Set(),fallbacks=[],fallbackIndex=0,activeId=null,loadingFallback=false,playbackTimer=null,playing=false;
+  let currentItemId=null,lastVideo=null,lastQR='',playerInstance=null,attempted=new Set(),fallbacks=[],fallbackIndex=0,activeId=null,loadingFallback=false,playbackTimer=null,playing=false,playerReady=false;
   const tvMode=new URLSearchParams(location.search).get('display')==='tv';
   function playbackNotice(message){let n=video.querySelector('.playback-notice');if(!n){n=node('button',undefined,'playback-notice');n.style.cssText='position:absolute;bottom:14px;left:50%;transform:translateX(-50%);z-index:10;padding:12px 18px;background:#222;color:#fff;border:2px solid #fff;cursor:pointer';n.onclick=()=>window.fireTvStartPlayback();video.append(n)}n.textContent=message;}
-  window.fireTvStartPlayback=()=>{try{playerInstance?.playVideo();}catch(e){console.warn('Playback start:',e)};};
+  window.fireTvStartPlayback=()=>{try{if(!playerReady){playbackNotice('YouTube player is still loading');return;}playerInstance?.unMute();playerInstance?.playVideo();playbackNotice('Starting video…');}catch(e){playbackNotice('Playback error: '+e.message)};};
   function showVideo(id){
-    activeId=id;playing=false;if(playbackTimer)clearTimeout(playbackTimer);
+    activeId=id;playing=false;playerReady=false;if(playbackTimer)clearTimeout(playbackTimer);
     try{playerInstance?.destroy()}catch{}
     playerInstance=null;
     video.replaceChildren();
     const holder=node('div');holder.id='yt-jukebox-player';holder.style.width='100%';holder.style.height='100%';video.append(holder);
-    if(!window.YT?.Player){video.append(node('p','Loading YouTube player…'));return;}
+    if(!window.YT?.Player){video.append(node('p','Loading YouTube player…'));if(tvMode)playbackNotice('YouTube player loading — press OK to retry');return;}
     if(tvMode)playbackTimer=setTimeout(()=>{if(!playing&&activeId===id)playbackNotice('Press OK to start video');},10000);
     playerInstance=new YT.Player(holder,{width:'100%',height:'100%',videoId:id,playerVars:{autoplay:1,playsinline:1,origin:location.origin},events:{
-      onReady:e=>{try{e.target.playVideo()}catch{}},
-      onError:()=>tryFallback(),
-      onStateChange:e=>{if(e.data===YT.PlayerState.PLAYING){playing=true;if(playbackTimer)clearTimeout(playbackTimer);video.querySelector('.playback-notice')?.remove()}if(e.data===YT.PlayerState.ENDED)tryFallback(true)}
+      onReady:e=>{playerReady=true;try{e.target.playVideo()}catch(err){if(tvMode)playbackNotice('Press OK to start video')}},
+      onError:e=>{console.warn('YouTube player error',e.data);if(tvMode)playbackNotice('Video unavailable ('+e.data+'). Trying alternative…');tryFallback()},
+      onStateChange:e=>{if(e.data===YT.PlayerState.PLAYING){playing=true;if(playbackTimer)clearTimeout(playbackTimer);video.querySelector('.playback-notice')?.remove()}if(e.data===YT.PlayerState.ENDED)tryFallback(true);if(tvMode&&e.data===YT.PlayerState.UNSTARTED)setTimeout(()=>{if(!playing&&activeId===id)playbackNotice('Press OK to start video');},4000)}
     }});
   }
   async function advanceAutomatically(){
@@ -71,7 +71,7 @@ function player(){
     }catch(e){video.replaceChildren(node('div','Playback failed: '+e.message,'placeholder'))}
     finally{loadingFallback=false}
   }
-  const ytScript=node('script');ytScript.src='https://www.youtube.com/iframe_api';document.head.append(ytScript);
+  const ytScript=node('script');ytScript.src='https://www.youtube.com/iframe_api';ytScript.onerror=()=>{if(tvMode)playbackNotice('YouTube API failed to load — check network')};document.head.append(ytScript);
   const previousReady=window.onYouTubeIframeAPIReady;
   window.onYouTubeIframeAPIReady=()=>{previousReady?.();if(lastVideo)showVideo(lastVideo)};
   if(window.YT?.Player&&lastVideo)showVideo(lastVideo);
