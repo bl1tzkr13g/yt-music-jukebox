@@ -29,22 +29,48 @@ function player(){
   const playlist=node('strong','Default Playlist'),upnext=node('div'),queueTitle=node('h3','Queue'),queue=node('div',undefined,'queue'),qr=node('div',undefined,'qr');
   const qrTitle=node('strong','Scan to request music'),qrImg=node('img'),qrLink=node('small');qrImg.alt='Guest request QR code';add(qr,qrTitle,qrImg,qrLink);
   add(left,video,now,comments);add(right,playlist,upnext,queueTitle,queue,qr);add(layout,left,right);app.append(layout);
-  let currentItemId=null,lastVideo=null,lastQR='',playerInstance=null,attempted=new Set(),fallbacks=[],fallbackIndex=0,activeId=null,loadingFallback=false,playbackTimer=null,playing=false,playerReady=false;
+  let currentItemId=null,lastVideo=null,lastQR='',playerInstance=null,attempted=new Set(),fallbacks=[],fallbackIndex=0,activeId=null,loadingFallback=false,playbackTimer=null,playing=false,playerReady=false,startAttempts=0,playerGeneration=0;
   const tvMode=new URLSearchParams(location.search).get('display')==='tv';
   function playbackNotice(message){let n=video.querySelector('.playback-notice');if(!n){n=node('button',undefined,'playback-notice');n.style.cssText='position:absolute;bottom:14px;left:50%;transform:translateX(-50%);z-index:10;padding:12px 18px;background:#222;color:#fff;border:2px solid #fff;cursor:pointer';n.onclick=()=>window.fireTvStartPlayback();video.append(n)}n.textContent=message;}
   window.fireTvStartPlayback=()=>{try{if(!playerReady){playbackNotice('YouTube player is still loading');return;}playerInstance?.unMute();playerInstance?.playVideo();playbackNotice('Starting video…');}catch(e){playbackNotice('Playback error: '+e.message)};};
-  function showVideo(id){
+  function scheduleStartCheck(id,generation){
+    if(!tvMode)return;
+    if(playbackTimer)clearTimeout(playbackTimer);
+    playbackTimer=setTimeout(async()=>{
+      if(generation!==playerGeneration||id!==activeId||playing)return;
+      if(!window.YT?.Player){
+        playbackNotice('YouTube player unavailable — retrying');
+        if(startAttempts++<2){scheduleStartCheck(id,generation);return;}
+      }else if(startAttempts===0){
+        startAttempts++;
+        playbackNotice('Retrying playback…');
+        try{playerInstance?.playVideo()}catch(e){console.warn(e)}
+        scheduleStartCheck(id,generation);
+        return;
+      }else if(startAttempts===1){
+        startAttempts++;
+        playbackNotice('Restarting video player…');
+        showVideo(id,true);
+        return;
+      }
+      playbackNotice('Unable to start video — trying another');
+      await tryFallback();
+    },startAttempts===0?12000:8000);
+  }
+  function showVideo(id,restarting=false){
+    if(!restarting)startAttempts=0;
+    const generation=++playerGeneration;
     activeId=id;playing=false;playerReady=false;if(playbackTimer)clearTimeout(playbackTimer);
     try{playerInstance?.destroy()}catch{}
     playerInstance=null;
     video.replaceChildren();
     const holder=node('div');holder.id='yt-jukebox-player';holder.style.width='100%';holder.style.height='100%';video.append(holder);
-    if(!window.YT?.Player){video.append(node('p','Loading YouTube player…'));if(tvMode)playbackNotice('YouTube player loading — press OK to retry');return;}
-    if(tvMode)playbackTimer=setTimeout(()=>{if(!playing&&activeId===id)playbackNotice('Press OK to start video');},10000);
+    if(!window.YT?.Player){video.append(node('p','Loading YouTube player…'));if(tvMode){playbackNotice('YouTube player loading…');scheduleStartCheck(id,generation)}return;}
+    scheduleStartCheck(id,generation);
     playerInstance=new YT.Player(holder,{width:'100%',height:'100%',videoId:id,playerVars:{autoplay:1,playsinline:1,origin:location.origin},events:{
-      onReady:e=>{playerReady=true;try{e.target.playVideo()}catch(err){if(tvMode)playbackNotice('Press OK to start video')}},
-      onError:e=>{console.warn('YouTube player error',e.data);if(tvMode)playbackNotice('Video unavailable ('+e.data+'). Trying alternative…');tryFallback()},
-      onStateChange:e=>{if(e.data===YT.PlayerState.PLAYING){playing=true;if(playbackTimer)clearTimeout(playbackTimer);video.querySelector('.playback-notice')?.remove()}if(e.data===YT.PlayerState.ENDED)tryFallback(true);if(tvMode&&e.data===YT.PlayerState.UNSTARTED)setTimeout(()=>{if(!playing&&activeId===id)playbackNotice('Press OK to start video');},4000)}
+      onReady:e=>{if(generation!==playerGeneration)return;playerReady=true;try{e.target.playVideo()}catch(err){if(tvMode)playbackNotice('Press OK to start video')}},
+      onError:e=>{if(generation!==playerGeneration)return;console.warn('YouTube player error',e.data);if(tvMode)playbackNotice('Video unavailable ('+e.data+'). Trying alternative…');tryFallback()},
+      onStateChange:e=>{if(generation!==playerGeneration)return;if(e.data===YT.PlayerState.PLAYING){playing=true;if(playbackTimer)clearTimeout(playbackTimer);video.querySelector('.playback-notice')?.remove()}if(e.data===YT.PlayerState.ENDED)tryFallback(true);}
     }});
   }
   async function advanceAutomatically(){
@@ -81,7 +107,7 @@ function player(){
     playlist.textContent='Enabled playlists: '+(s.playlists?.filter(p=>p.enabled).map(p=>p.name).join(', ')||'None configured');
     title.textContent='Now Playing: '+(s.nowPlaying?.title||'Waiting for a song');
     requester.textContent='Requested by: '+(s.nowPlaying?.nickname||'Default playlist');
-    if(s.nowPlaying?.videoId!==lastVideo){currentItemId=s.nowPlaying?.id||null;lastVideo=s.nowPlaying?.videoId||null;attempted=new Set();fallbacks=[];fallbackIndex=0;if(lastVideo){attempted.add(lastVideo);showVideo(lastVideo)}else video.replaceChildren(node('div','Waiting for playback…','placeholder'))}
+    if(s.nowPlaying?.videoId!==lastVideo){currentItemId=s.nowPlaying?.id||null;lastVideo=s.nowPlaying?.videoId||null;attempted=new Set();fallbacks=[];fallbackIndex=0;if(lastVideo){attempted.add(lastVideo);showVideo(lastVideo)}else{if(playbackTimer)clearTimeout(playbackTimer);playerGeneration++;video.replaceChildren(node('div','Waiting for playback…','placeholder'))}}
     upnext.replaceChildren(node('h2','Up Next'),node('strong',s.queue[0]?.title||'Default playlist'),node('p','Requested by: '+(s.queue[0]?.nickname||'Host')));
     queueTitle.style.display=p.show_queue===false?'none':'';queue.style.display=p.show_queue===false?'none':'';
     if(p.show_queue!==false)renderQueue(queue,{queue:s.queue.slice(1)});
